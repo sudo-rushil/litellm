@@ -32,6 +32,45 @@ ANTHROPIC_ADAPTER = AnthropicAdapter()
 
 class LiteLLMMessagesToCompletionTransformationHandler:
     @staticmethod
+    def _is_specific_tool_choice(tool_choice: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(tool_choice, dict):
+            return False
+
+        tool_choice_type = tool_choice.get("type")
+        if tool_choice_type == "tool":
+            tool_name = tool_choice.get("name")
+            return isinstance(tool_name, str) and len(tool_name) > 0
+
+        if tool_choice_type == "function":
+            function_obj = tool_choice.get("function")
+            if isinstance(function_obj, dict):
+                function_name = function_obj.get("name")
+                return isinstance(function_name, str) and len(function_name) > 0
+
+        return False
+
+    @staticmethod
+    def _validate_specific_tool_choice_requires_tools(
+        *,
+        tool_choice: Optional[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        model: str,
+    ) -> None:
+        if not LiteLLMMessagesToCompletionTransformationHandler._is_specific_tool_choice(
+            tool_choice
+        ):
+            return
+
+        if isinstance(tools, list) and len(tools) > 0:
+            return
+
+        raise litellm.BadRequestError(
+            message="`tool_choice` with a specific tool requires non-empty `tools`.",
+            model=model,
+            llm_provider="anthropic_messages",
+        )
+
+    @staticmethod
     def _route_openai_thinking_to_responses_api_if_needed(
         completion_kwargs: Dict[str, Any],
         *,
@@ -119,6 +158,12 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         """
         from litellm.litellm_core_utils.litellm_logging import (
             Logging as LiteLLMLoggingObject,
+        )
+
+        LiteLLMMessagesToCompletionTransformationHandler._validate_specific_tool_choice_requires_tools(
+            tool_choice=tool_choice,
+            tools=tools,
+            model=model,
         )
 
         request_data = {

@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath("../../../../.."))
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import litellm
 from litellm.anthropic_interface import messages
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.utils import Delta, ModelResponse, StreamingChoices
@@ -90,6 +91,27 @@ def test_anthropic_experimental_pass_through_messages_handler_custom_llm_provide
         assert call_kwargs["custom_llm_provider"] == "my-custom-llm"
         assert call_kwargs["model"] == "my-custom-llm/my-custom-model"
         assert call_kwargs["api_key"] == "test-api-key"
+
+
+def test_specific_tool_choice_requires_tools_before_provider_call():
+    """
+    Regression test: /v1/messages adapter should fail locally when a specific
+    tool is selected but `tools` is missing/empty.
+    """
+    from litellm.llms.anthropic.experimental_pass_through.messages.handler import (
+        anthropic_messages_handler,
+    )
+
+    with patch("litellm.completion") as mock_completion:
+        with pytest.raises(litellm.BadRequestError):
+            anthropic_messages_handler(
+                max_tokens=100,
+                messages=[{"role": "user", "content": "Use weather tool"}],
+                model="openai/gpt-4o-mini",
+                tool_choice={"type": "tool", "name": "get_weather"},
+            )
+
+        mock_completion.assert_not_called()
 
 
 @pytest.mark.asyncio

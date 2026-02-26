@@ -600,6 +600,62 @@ def test_transform_request_single_char_keys_not_matched():
     print("✓ Single-character keys are not incorrectly matched to metadata/previous_response_id")
 
 
+def test_transform_request_converts_chat_tool_choice_to_responses_shape():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    handler = LiteLLMResponsesTransformationHandler()
+    logging_obj = Mock()
+
+    result = handler.transform_request(
+        model="gpt-5.3-codex",
+        messages=[{"role": "user", "content": "Use get_weather"}],
+        optional_params={
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        },
+        litellm_params={"custom_llm_provider": "azure"},
+        headers={},
+        litellm_logging_obj=logging_obj,
+    )
+
+    assert result["tool_choice"] == {"type": "function", "name": "get_weather"}
+    assert "function" not in result["tool_choice"]
+
+
+def test_transform_request_specific_tool_choice_requires_tools():
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    handler = LiteLLMResponsesTransformationHandler()
+    logging_obj = Mock()
+
+    with pytest.raises(litellm.BadRequestError):
+        handler.transform_request(
+            model="gpt-5.3-codex",
+            messages=[{"role": "user", "content": "Use get_weather"}],
+            optional_params={
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                }
+            },
+            litellm_params={"custom_llm_provider": "azure"},
+            headers={},
+            litellm_logging_obj=logging_obj,
+        )
+
+
 # =============================================================================
 # Tests for issue #17246: Streaming tool_calls dropped when text + tool_calls
 # =============================================================================
@@ -699,6 +755,13 @@ def test_response_completed_with_function_calls_emits_tool_calls_finish_reason()
     assert result.choices[0].finish_reason == "tool_calls", (
         "response.completed with function_call output should emit finish_reason='tool_calls'"
     )
+    assert result.choices[0].delta.tool_calls is not None
+    assert len(result.choices[0].delta.tool_calls) == 1
+    assert result.choices[0].delta.tool_calls[0].id == "call_abc123"
+    assert (
+        result.choices[0].delta.tool_calls[0].function.arguments
+        == '{"path": "/tmp/test.py"}'
+    )
 
 
 def test_response_completed_with_message_only_emits_stop_finish_reason():
@@ -738,10 +801,10 @@ def test_response_completed_with_message_only_emits_stop_finish_reason():
     )
 
 
-def test_function_call_done_emits_is_finished():
+def test_function_call_done_emits_tool_calls_without_finish_reason():
     """
-    Test that OUTPUT_ITEM_DONE for a function_call still emits is_finished=True.
-    This preserves existing behavior for tool_calls.
+    `response.output_item.done` should emit a tool delta but defer finish_reason
+    to `response.completed`.
     """
     from litellm.completion_extras.litellm_responses_transformation.transformation import (
         OpenAiResponsesToChatCompletionStreamIterator,
@@ -761,12 +824,55 @@ def test_function_call_done_emits_is_finished():
 
     result = iterator.chunk_parser(chunk)
 
-    # function_call completion should emit finish_reason='tool_calls'
+    # function_call completion should emit tool_calls without finish_reason
     assert len(result.choices) > 0, "result should have choices"
-    assert result.choices[0].finish_reason == "tool_calls", "function_call should emit finish_reason='tool_calls'"
-    assert result.choices[0].delta.tool_calls is not None and len(result.choices[0].delta.tool_calls) > 0, (
-        "function_call should include tool_calls"
+    assert result.choices[0].finish_reason is None
+    assert (
+        result.choices[0].delta.tool_calls is not None
+        and len(result.choices[0].delta.tool_calls) > 0
+    ), "function_call should include tool_calls"
+
+
+def test_function_call_done_duplicate_after_added_emits_no_duplicate_tool_call():
+    """
+    If a tool call is already emitted on `response.output_item.added`, the matching
+    `response.output_item.done` for the same call_id should not emit a duplicate.
+    """
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
     )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True
+    )
+
+    added_result = iterator.chunk_parser(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "name": "get_weather",
+                "call_id": "call_123",
+            },
+        }
+    )
+    done_result = iterator.chunk_parser(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "get_weather",
+                "call_id": "call_123",
+                "arguments": '{"location":"Tokyo"}',
+            },
+        }
+    )
+
+    assert added_result.choices[0].delta.tool_calls is not None
+    assert len(added_result.choices[0].delta.tool_calls) == 1
+
+    assert done_result.choices[0].finish_reason is None
+    assert done_result.choices[0].delta.tool_calls is None
 
 
 def test_text_plus_tool_calls_sequence():
@@ -774,8 +880,7 @@ def test_text_plus_tool_calls_sequence():
     Test the full sequence when model returns text + tool_calls.
     This is the main scenario for issue #17246.
 
-    Expected: is_finished=True should NOT appear until function_call is done,
-    not when message is done.
+    Expected: finish_reason should be emitted only on `response.completed`.
     """
     from litellm.completion_extras.litellm_responses_transformation.transformation import (
         OpenAiResponsesToChatCompletionStreamIterator,
@@ -824,12 +929,11 @@ def test_text_plus_tool_calls_sequence():
         "message done should not have finish_reason"
     )
 
-    # Check function_call done (index 5) DOES have finish_reason='tool_calls'
+    # Check function_call done (index 5) does NOT have finish_reason
     function_done_result = results[5]
     assert len(function_done_result.choices) > 0, "function_call done should have choices"
-    assert function_done_result.choices[0].finish_reason == "tool_calls", (
-        "function_call done should have finish_reason='tool_calls'"
-    )
+    assert function_done_result.choices[0].finish_reason is None
+    assert function_done_result.choices[0].delta.tool_calls is None
 
     # Check response.completed (index 6) has finish_reason='stop'
     completed_result = results[6]
