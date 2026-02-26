@@ -2620,6 +2620,52 @@ def test_model_info_for_vertex_ai_deepseek_model():
     print("vertex deepseek model info", model_info)
 
 
+def test_get_model_info_strips_responses_prefix_for_openai():
+    model_info = litellm.get_model_info(
+        model="responses/gpt-5",
+        custom_llm_provider="openai",
+    )
+
+    assert model_info is not None
+    assert model_info["key"] == "gpt-5"
+    assert model_info["litellm_provider"] == "openai"
+
+
+def test_get_model_info_strips_responses_prefix_for_azure_codex():
+    direct_model_info = litellm.get_model_info(
+        model="gpt-5.3-codex",
+        custom_llm_provider="azure",
+    )
+    model_info = litellm.get_model_info(
+        model="responses/gpt-5.3-codex",
+        custom_llm_provider="azure",
+    )
+
+    assert direct_model_info is not None
+    assert direct_model_info["key"] == "azure/gpt-5.3-codex"
+    assert direct_model_info["litellm_provider"] == "azure"
+    assert model_info is not None
+    assert model_info["key"] == "azure/gpt-5.3-codex"
+    assert model_info["litellm_provider"] == "azure"
+    assert model_info["mode"] == "responses"
+    assert model_info["supports_tool_choice"] is True
+
+
+def test_model_info_for_azure_gpt_5_3_codex_in_model_cost_map():
+    from pathlib import Path
+
+    json_path = Path(__file__).parents[2] / "model_prices_and_context_window.json"
+    with open(json_path) as f:
+        model_cost = json.load(f)
+
+    model_info = model_cost.get("azure/gpt-5.3-codex")
+    assert model_info is not None
+    assert model_info["litellm_provider"] == "azure"
+    assert model_info["mode"] == "responses"
+    assert model_info["supports_tool_choice"] is True
+    assert model_info["supported_endpoints"] == ["/v1/responses"]
+
+
 def test_model_info_for_openrouter_kimi_k2_5():
     """
     Test that openrouter/moonshotai/kimi-k2.5 model info is correctly configured
